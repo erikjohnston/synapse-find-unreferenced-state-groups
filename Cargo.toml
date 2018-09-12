@@ -1,0 +1,9 @@
+[package]
+authors = ["Erik Johnston"]
+name = "rust-synapse-find-unreferenced-state-groups"
+version = "0.1.0"
+
+[dependencies]
+clap = "2.32.0"
+fallible-iterator = "0.1.5"
+postgres = "0.15.2"
