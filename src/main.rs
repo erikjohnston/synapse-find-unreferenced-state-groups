@@ -90,32 +90,32 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
                 forwards.state_group AS next,
                 backwards.prev_state_group AS prev,
                 e.event_id IS NOT NULL AS is_referenced
-            FROM state_groups AS main
+            FROM (SELECT $1::bigint AS id) AS main
             LEFT JOIN state_group_edges AS backwards ON (main.id = backwards.state_group)
             LEFT JOIN state_group_edges AS forwards ON (main.id = forwards.prev_state_group)
             LEFT JOIN event_to_state_groups AS e ON (e.state_group = main.id)
-            WHERE main.id = ANY($1)
         "#).unwrap();
-    let trans = conn.transaction().unwrap();
-
-    let mut rows = stmt.lazy_query(&trans, &[&missing_sgs], 100).unwrap();
 
     let mut state_group_map: BTreeMap<i64, Entry> = BTreeMap::new();
 
-    while let Some(row) = rows.next().unwrap() {
-        let state_group = row.get(0);
+    for missing_sg in missing_sgs {
+        let mut rows = stmt.query(&[&missing_sg]).unwrap();
 
-        // We might get multiple rows per state_group due to having multiple
-        // next state groups.
-        let entry = state_group_map.entry(state_group).or_default();
+        for row in &rows {
+            let state_group = row.get(0);
 
-        if let Some(next_group) = row.get(1) {
-            entry.next_state_groups.push(next_group);
+            // We might get multiple rows per state_group due to having multiple
+            // next state groups.
+            let entry = state_group_map.entry(state_group).or_default();
+
+            if let Some(next_group) = row.get(1) {
+                entry.next_state_groups.push(next_group);
+            }
+
+            // These will all remain the same though.
+            entry.prev_state_group = row.get(2);
+            entry.is_referenced = row.get(3);
         }
-
-        // These will all remain the same though.
-        entry.prev_state_group = row.get(2);
-        entry.is_referenced = row.get(3);
     }
 
     state_group_map
@@ -194,15 +194,20 @@ fn main() {
 
         println!("Fetching {} missing state groups from DB", missing.len());
 
-        println!("{:#?}", missing);
-
         let updated = get_missing_from_db(db_url, &missing);
 
         println!("Got {} from DB", updated.len());
-        println!("{:#?}", updated.keys().cloned().collect::<Vec<_>>());
 
         added.clear();
         added.extend(updated.keys());
+
+        let missing_set: BTreeSet<i64> = missing.iter().cloned().collect();
+
+        let still_missing = missing_set.difference(&added).count();
+        if still_missing > 0 {
+            println!("Failed to find {} groups", still_missing);
+        }
+
         map.extend(updated.into_iter());
     }
 
