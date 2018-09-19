@@ -1,17 +1,18 @@
 #[macro_use]
 extern crate clap;
 extern crate fallible_iterator;
+extern crate indicatif;
 extern crate postgres;
 
 use clap::{App, Arg};
 use fallible_iterator::FallibleIterator;
-use postgres::{Connection, TlsMode};
+use indicatif::{ProgressBar, ProgressStyle};
 use postgres::types::ToSql;
+use postgres::{Connection, TlsMode};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
-
 
 #[derive(Default)]
 struct Entry {
@@ -53,14 +54,15 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
 
     let mut state_group_map: BTreeMap<i64, Entry> = BTreeMap::new();
 
-    let mut started = false;
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner().template("{spinner} [{elapsed}] {pos} rows retrieved"),
+    );
+    pb.enable_steady_tick(100);
+
+    let mut num_rows = 0;
 
     while let Some(row) = rows.next().unwrap() {
-        if !started {
-            println!("Started streaming from DB");
-            started = true;
-        }
-
         let state_group = row.get(0);
 
         // We might get multiple rows per state_group due to having multiple
@@ -74,7 +76,13 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
         // These will all remain the same though.
         entry.prev_state_group = row.get(2);
         entry.is_referenced = row.get(3);
+
+        pb.inc(1);
+        num_rows += 1
     }
+
+    pb.set_length(num_rows);
+    pb.finish();
 
     state_group_map
 }
@@ -84,7 +92,8 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
     let conn = Connection::connect(db_url, TlsMode::None).unwrap();
 
     let stmt = conn
-        .prepare(r#"
+        .prepare(
+            r#"
             SELECT
                 main.id AS state_group,
                 forwards.state_group AS next,
@@ -94,7 +103,8 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
             LEFT JOIN state_group_edges AS backwards ON (main.id = backwards.state_group)
             LEFT JOIN state_group_edges AS forwards ON (main.id = forwards.prev_state_group)
             LEFT JOIN event_to_state_groups AS e ON (e.state_group = main.id)
-        "#).unwrap();
+        "#,
+        ).unwrap();
 
     let mut state_group_map: BTreeMap<i64, Entry> = BTreeMap::new();
 
@@ -151,8 +161,7 @@ fn main() {
         .value_of("postgres-url")
         .expect("db url should be required");
 
-    let room_id = matches
-        .value_of("room_id");
+    let room_id = matches.value_of("room_id");
 
     let mut output_file = matches
         .value_of("output")
@@ -213,7 +222,8 @@ fn main() {
 
     println!("Total state groups: {}", map.len());
 
-    // Now we propagate referenced flag
+    // Now we propagate referenced flag, i.e. if a state group is referenced
+    // then its prev group should also be marked as referenced, recursively.
     for state_group in map.keys().cloned().collect::<Vec<_>>() {
         let mut next = {
             let entry = &map[&state_group];
