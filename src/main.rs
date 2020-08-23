@@ -34,11 +34,10 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
             main.id AS state_group,
             forwards.state_group AS next,
             backwards.prev_state_group AS prev,
-            e.event_id IS NOT NULL AS is_referenced
+            EXISTS (SELECT 1 FROM event_to_state_groups WHERE state_group = main.id) AS is_referenced
         FROM state_groups AS main
         LEFT JOIN state_group_edges AS backwards ON (main.id = backwards.state_group)
         LEFT JOIN state_group_edges AS forwards ON (main.id = forwards.prev_state_group)
-        LEFT JOIN event_to_state_groups AS e ON (e.state_group = main.id)
     "#.to_string();
     let mut args: Vec<&ToSql> = Vec::new();
 
@@ -98,11 +97,10 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
                 main.id AS state_group,
                 forwards.state_group AS next,
                 backwards.prev_state_group AS prev,
-                e.event_id IS NOT NULL AS is_referenced
+                EXISTS (SELECT 1 FROM event_to_state_groups WHERE state_group = main.id) AS is_referenced
             FROM (SELECT $1::bigint AS id) AS main
             LEFT JOIN state_group_edges AS backwards ON (main.id = backwards.state_group)
             LEFT JOIN state_group_edges AS forwards ON (main.id = forwards.prev_state_group)
-            LEFT JOIN event_to_state_groups AS e ON (e.state_group = main.id)
         "#,
         ).unwrap();
 
