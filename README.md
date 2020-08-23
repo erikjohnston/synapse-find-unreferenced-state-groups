@@ -10,7 +10,7 @@ between the state groups and the events being persisted. As such this tool may
 pick up recent state groups that *will in future* get referenced by events that
 are still getting processed.
 
-Do *not* blindly delete all the state groups that are returned by this tool
+Do *not* blindly delete all the state groups that are returned by this tool.
 
 
 ## Usage
@@ -32,4 +32,18 @@ OPTIONS:
     -o <FILE>           File to output unreferenced groups to
     -p <URL>            The url for connecting to the postgres database
     -r <ROOM_ID>        The room to process
+```
+
+For example:
+```bash
+rust-synapse-find-unreferenced-state-groups -p postgres://user:pass@localhost/synapse -r '!cURbafjkfsMDVwdRDQ:matrix.org' -o /tmp/sgs.txt
+```
+To delete the unreferenced state groups, use something like this in postgres:
+
+```sql
+CREATE TEMPORARY TABLE unreffed(id BIGINT PRIMARY KEY);
+COPY unreffed FROM '/tmp/sgs.txt' WITH (FORMAT 'csv');
+DELETE FROM state_groups_state WHERE state_group IN (SELECT id FROM unreffed);
+DELETE FROM state_group_edges WHERE state_group IN (SELECT id FROM unreffed);
+DELETE FROM state_groups WHERE id IN (SELECT id FROM unreffed);
 ```
