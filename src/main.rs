@@ -1,14 +1,7 @@
-#[macro_use]
-extern crate clap;
-extern crate fallible_iterator;
-extern crate indicatif;
-extern crate postgres;
-
-use clap::{App, Arg};
-use fallible_iterator::FallibleIterator;
+use clap::{app_from_crate, Arg};
 use indicatif::{ProgressBar, ProgressStyle};
 use postgres::types::ToSql;
-use postgres::{Connection, TlsMode};
+use postgres::{Client, NoTls};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -27,7 +20,7 @@ struct Entry {
 /// Get state groups from the database. If `room_id` is set then its limited
 /// to state groups for that room
 fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
-    let conn = Connection::connect(db_url, TlsMode::None).unwrap();
+    let mut conn = Client::connect(db_url, NoTls).unwrap();
 
     let mut sql = r#"
         SELECT
@@ -39,7 +32,7 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
         LEFT JOIN state_group_edges AS backwards ON (main.id = backwards.state_group)
         LEFT JOIN state_group_edges AS forwards ON (main.id = forwards.prev_state_group)
     "#.to_string();
-    let mut args: Vec<&ToSql> = Vec::new();
+    let mut args: Vec<&(dyn ToSql + Sync)> = Vec::new();
 
     if let Some(room_id) = &room_id {
         sql.push_str(" WHERE room_id = $1");
@@ -47,9 +40,9 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
     }
 
     let stmt = conn.prepare(&sql).unwrap();
-    let trans = conn.transaction().unwrap();
+    let mut trans = conn.transaction().unwrap();
 
-    let mut rows = stmt.lazy_query(&trans, args.as_slice(), 100).unwrap();
+    let portal = trans.bind(&stmt, &*args).unwrap();
 
     let mut state_group_map: BTreeMap<i64, Entry> = BTreeMap::new();
 
@@ -61,23 +54,30 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
 
     let mut num_rows = 0;
 
-    while let Some(row) = rows.next().unwrap() {
-        let state_group = row.get(0);
-
-        // We might get multiple rows per state_group due to having multiple
-        // next state groups.
-        let entry = state_group_map.entry(state_group).or_default();
-
-        if let Some(next_group) = row.get(1) {
-            entry.next_state_groups.push(next_group);
+    loop {
+        let rows = trans.query_portal(&portal, 10000).unwrap();
+        if rows.len() < 10000 {
+            break;
         }
 
-        // These will all remain the same though.
-        entry.prev_state_group = row.get(2);
-        entry.is_referenced = row.get(3);
+        for row in rows {
+            let state_group = row.get(0);
 
-        pb.inc(1);
-        num_rows += 1
+            // We might get multiple rows per state_group due to having multiple
+            // next state groups.
+            let entry = state_group_map.entry(state_group).or_default();
+
+            if let Some(next_group) = row.get(1) {
+                entry.next_state_groups.push(next_group);
+            }
+
+            // These will all remain the same though.
+            entry.prev_state_group = row.get(2);
+            entry.is_referenced = row.get(3);
+
+            pb.inc(1);
+            num_rows += 1
+        }
     }
 
     pb.set_length(num_rows);
@@ -88,7 +88,7 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
 
 /// Get any missing state groups from the database
 fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry> {
-    let conn = Connection::connect(db_url, TlsMode::None).unwrap();
+    let mut conn = Client::connect(db_url, NoTls).unwrap();
 
     let stmt = conn
         .prepare(
@@ -107,7 +107,7 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
     let mut state_group_map: BTreeMap<i64, Entry> = BTreeMap::new();
 
     for missing_sg in missing_sgs {
-        let mut rows = stmt.query(&[&missing_sg]).unwrap();
+        let rows = conn.query(&stmt, &[&missing_sg]).unwrap();
 
         for row in &rows {
             let state_group = row.get(0);
@@ -130,30 +130,30 @@ fn get_missing_from_db(db_url: &str, missing_sgs: &[i64]) -> BTreeMap<i64, Entry
 }
 
 fn main() {
-    let matches = App::new(crate_name!())
-        .version(crate_version!())
-        .author(crate_authors!("\n"))
-        .about(crate_description!())
+    let matches = app_from_crate!()
         .arg(
-            Arg::with_name("postgres-url")
-                .short("p")
+            Arg::new("postgres-url")
+                .short('p')
                 .value_name("URL")
                 .help("The url for connecting to the postgres database")
                 .takes_value(true)
                 .required(true),
-        ).arg(
-            Arg::with_name("room_id")
-                .short("r")
+        )
+        .arg(
+            Arg::new("room_id")
+                .short('r')
                 .value_name("ROOM_ID")
                 .help("The room to process")
                 .takes_value(true),
-        ).arg(
-            Arg::with_name("output")
-                .short("o")
+        )
+        .arg(
+            Arg::new("output")
+                .short('o')
                 .value_name("FILE")
                 .help("File to output unreferenced groups to")
                 .takes_value(true),
-        ).get_matches();
+        )
+        .get_matches();
 
     let db_url = matches
         .value_of("postgres-url")
@@ -180,7 +180,7 @@ fn main() {
 
         for sg in &added {
             for next_sg in &map[sg].next_state_groups {
-                if !map.contains_key(&next_sg) {
+                if !map.contains_key(next_sg) {
                     missing.push(*next_sg);
                 }
             }
@@ -229,14 +229,14 @@ fn main() {
                 continue;
             }
 
-            entry.prev_state_group.clone()
+            entry.prev_state_group
         };
 
         while let Some(sg) = next.take() {
             let entry = map.get_mut(&sg).unwrap();
             if !entry.is_referenced {
                 entry.is_referenced = true;
-                next = entry.prev_state_group.clone();
+                next = entry.prev_state_group;
             }
         }
     }
@@ -247,7 +247,7 @@ fn main() {
             total += 1;
 
             if let Some(ref mut fs) = output_file {
-                writeln!(fs, "{}", state_group);
+                writeln!(fs, "{}", state_group).unwrap();
             }
         }
     }
