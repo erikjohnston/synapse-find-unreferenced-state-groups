@@ -56,7 +56,7 @@ fn get_from_db(db_url: &str, room_id: Option<&str>) -> BTreeMap<i64, Entry> {
 
     loop {
         let rows = trans.query_portal(&portal, 10000).unwrap();
-        if rows.len() < 10000 {
+        if rows.len() == 0 {
             break;
         }
 
