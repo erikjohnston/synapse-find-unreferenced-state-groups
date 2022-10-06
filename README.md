@@ -8,10 +8,12 @@ such unreferenced groups.
 **CAUTION**: While synapse is running and processing events there is a delay
 between the state groups and the events being persisted. As such this tool may
 pick up recent state groups that *will in future* get referenced by events that
-are still getting processed.
+are still getting processed. If you ran `rust-synapse-find-unreferenced-state-groups`,
+while Synapse was running, do *not* blindly delete all the state groups that
+were returned.
 
-Do *not* blindly delete all the state groups that are returned by this tool.
-
+If you stop Synapse before running `rust-synapse-find-unreferenced-state-groups`,
+it is safe to delete all the state groups that are returned.
 
 ## Usage
 
